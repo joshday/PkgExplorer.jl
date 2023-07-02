@@ -3,6 +3,13 @@ uuid = "8b962109-0d2b-4118-aacf-d7b7f7c0f6f4"
 authors = ["Josh Day <emailjoshday@gmail.com> and contributors"]
 version = "1.0.0-DEV"
 
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
 [compat]
 julia = "1"
 
