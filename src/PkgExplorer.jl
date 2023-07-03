@@ -96,27 +96,35 @@ function update_compat(project_toml::String)
 end
 
 function update_compat!(project_toml::String)
-    data = update_compat(project_toml)
-    get!(data, "compat", Dict{String,Any}())
-    io = IOBuffer()
-    TOML.print(io, data; sorted=true, by=key->(Pkg.Types.project_key_order(key), key))
-    content = String(take!(io))
+    original = read(project_toml, String)
+    try
+        data = update_compat(project_toml)
+        get!(data, "compat", Dict{String,Any}())
+        io = IOBuffer()
+        TOML.print(io, data; sorted=true, by=key->(Pkg.Types.project_key_order(key), key))
+        content = String(take!(io))
 
-    compat = filter(kv -> kv[1] != "julia", data["compat"])
-    lines = Dict(k => string(k, " = ", repr(v)) for (k,v) in compat)
+        compat = filter(kv -> kv[1] != "julia", data["compat"])
+        lines = Dict(k => string(k, " = ", repr(v)) for (k,v) in compat)
 
-    width = maximum(length, values(lines))
-    content = replace(content, "[compat]" => "[compat]" * ' ' ^ (width - 6) * "# Latest:")
-    for (pkg, line) in lines
-        v = maximum(versions(pkg))
-        content = replace(content, line => line * ' ' ^ (width - length(line)) * "  #   $v")
+        width = maximum(length, values(lines))
+        content = replace(content, "[compat]" => "[compat]" * ' ' ^ (width - 6) * "# Latest:")
+        for (pkg, line) in lines
+            v = maximum(versions(pkg))
+            content = replace(content, line => line * ' ' ^ (width - length(line)) * "  #   $v")
+        end
+
+        open(project_toml, "w") do io
+            println(io, "# Updated by PkgExplorer.jl at ", Dates.format(now(UTC), "yyyy-mm-dd HH:MM:SS"), " (UTC).")
+            print(io, content)
+        end
+        return project_toml
+    catch
+        @warn "An Error occurred.  Restoring original file: $project_toml."
+        open(project_toml, "w") do io
+            print(io, original)
+        end
     end
-
-    open(project_toml, "w") do io
-        println(io, "# Updated by PkgExplorer.jl: ", Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
-        print(io, content)
-    end
-    return project_toml
 end
 
 end
