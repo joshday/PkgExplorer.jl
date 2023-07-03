@@ -1,6 +1,5 @@
 module PkgExplorer
 
-
 using Pkg
 using TOML
 using Printf
@@ -8,11 +7,23 @@ using Dates
 
 using DataFrames
 
-export registry_df, update_compat, update_compat!
+export pkgs, stdlibs, update_compat, update_compat!
 
-#-----------------------------------------------------------------------------# registry_df
-function registry_df()
-    df = mapreduce(vcat, Pkg.Registry.reachable_registries(), init = DataFrame()) do reg
+#-----------------------------------------------------------------------------# __init__
+const pkgs = DataFrame()
+const stdlibs = DataFrame()
+registry_updated_at = now()
+
+function __init__()
+    Pkg.Registry.update()
+    registry_updated_at = now()
+    append!(pkgs, pkgs_df())
+    append!(stdlibs, stdlibs_df())
+end
+
+#-----------------------------------------------------------------------------# get DataFrames
+function pkgs_df(registries = Pkg.Registry.reachable_registries())
+    df = mapreduce(vcat, registries, init = DataFrame()) do reg
         foreach(x-> Pkg.Registry.init_package_info!(x[2]), reg.pkgs)
         DataFrame((
                 name = entry.name,
@@ -24,37 +35,43 @@ function registry_df()
                 versions = entry.info.version_info,
                 weak_compat = entry.info.weak_compat,
                 weak_deps = entry.info.weak_deps,
-                stdlib = uuid in keys(Pkg.Types.stdlibs())
-            ) for (uuid,entry) in reg.pkgs
+                stdlib = entry.uuid in keys(Pkg.Types.stdlibs())
+            ) for entry in values(reg.pkgs)
         )
     end
-    stdlibs = DataFrame((; name = x[2][1], uuid = x[1], stdlib_version=x[2][2], stdlib=true) for x in Pkg.Types.stdlibs())
-    out = outerjoin(df, stdlibs, on = [:uuid, :name, :stdlib])
-    nrow(out) == length(unique(out.uuid)) || @warn "Duplicate UUIDs found in registry!"
-    metadata!(out, "generated_at", now(), style=:note)
-    return out
+    metadata!(df, "generated_at", now(), style=:note)
+    metadata!(df, "registries", registries, style=:note)
+    return df
+end
+
+stdlibs_df() = DataFrame((; name = x[2][1], uuid = x[1], version=x[2][2]) for x in Pkg.Types.stdlibs())
+
+#-----------------------------------------------------------------------------# utils
+pkg_data(pkg::String) = only(pkgs[pkgs.name .== pkg, :])
+pkg_data(uuid::Base.UUID) = only(pkgs[pkgs.uuid .== uuid, :])
+
+function versions(pkg::Union{Base.UUID, String}; include_yanked=false)
+    v = pkg_data(pkg).versions
+    !include_yanked && filter!(x -> !x.second.yanked, v)
+    sort!(collect(keys(v)))
 end
 
 #-----------------------------------------------------------------------------# update_compat
 function update_compat(project_toml::String)
-    endswith(project_toml, "Project.toml") ||
-        error("Expected basename of `Project.toml` or `JuliaProject.toml`.  Found: `$(basename(project_toml))`.")
-    isfile(project_toml) || error("File not found: $project_toml")
+    endswith(project_toml, "Project.toml") || error("Expected `(Julia)Project.toml`.  Found: $(basename(project_toml)).")
     data = TOML.parsefile(project_toml)
     compat = get!(data, "compat", Dict{String,Any}())
     deps = get!(data, "deps", Dict{String,Any}())
     old_data = deepcopy(data)
-    df = filter(x -> x.uuid in Base.UUID.(values(deps)), registry_df())
+    df = filter(x -> x.uuid in Base.UUID.(values(deps)) && !x.stdlib, pkgs)
     for row in eachrow(df)
         pkg = row.name
-        row.uuid in keys(Pkg.Types.stdlibs()) && continue
 
         # Most recent version in registry (that hasn't been yanked):
-        most_recent_version = maximum(first.(filter(x -> !x[2].yanked, collect(row.versions))))
-        (major, minor) = (most_recent_version.major, most_recent_version.minor)
+        (; major, minor, patch)  = maximum(versions(pkg))
         upper = "$major.$minor"
 
-        if haskey(compat, pkg)
+        if haskey(compat, pkg) && compat[pkg] != upper
             compat_entry = compat[pkg]
             if any(x -> occursin(x, compat_entry), "=~^,")
                 @warn "Only hyphen-specifiers are supported.  Found: $compat_entry."
@@ -81,9 +98,26 @@ end
 
 function update_compat!(project_toml::String)
     data = update_compat(project_toml)
-    open(project_toml, "w") do io
-        TOML.print(io, data; sorted=true, by=key->(Pkg.Types.project_key_order(key), key))
+    get!(data, "compat", Dict{String,Any}())
+    io = IOBuffer()
+    TOML.print(io, data; sorted=true, by=key->(Pkg.Types.project_key_order(key), key))
+    content = String(take!(io))
+
+    compat = filter(kv -> kv[1] != "julia", data["compat"])
+    lines = Dict(k => string(k, " = ", repr(v)) for (k,v) in compat)
+
+    width = maximum(length, values(lines))
+    content = replace(content, "[compat]" => "[compat]" * ' ' ^ (width - 6) * "# Latest:")
+    for (pkg, line) in lines
+        v = maximum(versions(pkg))
+        content = replace(content, line => line * ' ' ^ (width - length(line)) * "  #   $v")
     end
+
+    open(project_toml, "w") do io
+        println(io, "# Updated by PkgExplorer.jl: ", Dates.format(now(), "yyyy-mm-dd HH:MM:SS"))
+        print(io, content)
+    end
+    return project_toml
 end
 
 end
