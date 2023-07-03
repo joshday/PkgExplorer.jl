@@ -58,7 +58,6 @@ end
 
 #-----------------------------------------------------------------------------# update_compat
 function update_compat(project_toml::String)
-    endswith(project_toml, "Project.toml") || error("Expected `(Julia)Project.toml`.  Found: $(basename(project_toml)).")
     data = TOML.parsefile(project_toml)
     compat = get!(data, "compat", Dict{String,Any}())
     deps = get!(data, "deps", Dict{String,Any}())
