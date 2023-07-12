@@ -115,7 +115,6 @@ function update_compat!(project_toml::String)
         end
 
         open(project_toml, "w") do io
-            println(io, "# Updated by PkgExplorer.jl at ", Dates.format(now(UTC), "yyyy-mm-dd HH:MM:SS"), " (UTC).")
             print(io, content)
         end
         return project_toml
