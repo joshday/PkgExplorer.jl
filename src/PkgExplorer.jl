@@ -1,31 +1,33 @@
 module PkgExplorer
 
-using Pkg
-using TOML
-using Printf
 using Dates
+using Pkg
+using Pkg.Types: VersionSpec, Project, read_project, is_stdlib
 
+using Term: Term
 using DataFrames
 
-export pkgs, stdlibs, update_compat, update_compat!
+export
+    # Compat
+    CompatEntry, read_compat_entries,
+    # Utils
+    registry_df, pkg_entry, versions
 
 #-----------------------------------------------------------------------------# __init__
-const pkgs = DataFrame()
-const stdlibs = DataFrame()
-registry_updated_at = now()
+const registries = Pkg.Registry.reachable_registries()
+const registry_df = DataFrame()
 
 function __init__()
+    @info "Updating Registries..."
     Pkg.Registry.update()
-    registry_updated_at = now()
-    append!(pkgs, pkgs_df())
-    append!(stdlibs, stdlibs_df())
-end
-
-#-----------------------------------------------------------------------------# get DataFrames
-function pkgs_df(registries = Pkg.Registry.reachable_registries())
-    df = mapreduce(vcat, registries, init = DataFrame()) do reg
-        foreach(x-> Pkg.Registry.init_package_info!(x[2]), reg.pkgs)
+    for reg in registries
+        Pkg.Registry.init_package_info!.(values(reg.pkgs))
+        Pkg.Registry.create_name_uuid_mapping!(reg)
+    end
+    @info "Updating `registry_df`..."
+    temp_df = mapreduce(vcat, registries, init = DataFrame()) do reg
         DataFrame((
+                registry = reg.name,
                 name = entry.name,
                 uuid = entry.uuid,
                 compat = entry.info.compat,
@@ -35,95 +37,107 @@ function pkgs_df(registries = Pkg.Registry.reachable_registries())
                 versions = entry.info.version_info,
                 weak_compat = entry.info.weak_compat,
                 weak_deps = entry.info.weak_deps,
-                stdlib = entry.uuid in keys(Pkg.Types.stdlibs())
+                stdlib = is_stdlib(entry.uuid)
             ) for entry in values(reg.pkgs)
         )
     end
-    metadata!(df, "generated_at", now(), style=:note)
-    metadata!(df, "registries", registries, style=:note)
-    return df
+    metadata!(temp_df, "generated_at", now(), style=:note)
+    metadata!(temp_df, "registries", registries, style=:note)
+    append!(registry_df, temp_df)
 end
 
-stdlibs_df() = DataFrame((; name = x[2][1], uuid = x[1], version=x[2][2]) for x in Pkg.Types.stdlibs())
-
-#-----------------------------------------------------------------------------# utils
-pkg_data(pkg::String) = only(pkgs[pkgs.name .== pkg, :])
-pkg_data(uuid::Base.UUID) = only(pkgs[pkgs.uuid .== uuid, :])
-
-function versions(pkg::Union{Base.UUID, String}; include_yanked=false)
-    v = pkg_data(pkg).versions
-    !include_yanked && filter!(x -> !x.second.yanked, v)
-    sort!(collect(keys(v)))
-end
-
-#-----------------------------------------------------------------------------# update_compat
-function update_compat(project_toml::String)
-    data = TOML.parsefile(project_toml)
-    compat = get!(data, "compat", Dict{String,Any}())
-    deps = get!(data, "deps", Dict{String,Any}())
-    old_data = deepcopy(data)
-    df = filter(x -> x.uuid in Base.UUID.(values(deps)) && !x.stdlib, pkgs)
-    for row in eachrow(df)
-        pkg = row.name
-
-        # Most recent version in registry (that hasn't been yanked):
-        (; major, minor, patch)  = maximum(versions(pkg))
-        upper = "$major.$minor"
-
-        if haskey(compat, pkg) && compat[pkg] != upper
-            compat_entry = compat[pkg]
-            if any(x -> occursin(x, compat_entry), "=~^,")
-                @warn "Only hyphen-specifiers are supported.  Found: $compat_entry."
-                continue
-            end
-            lower = split(compat_entry, " - ")[1]
-            compat[pkg] = lower == upper ? lower : "$lower - $upper"
-        else
-            data["compat"][pkg] = upper
-        end
+#-----------------------------------------------------------------------------# pkg_entry
+function pkg_entry(pkg::Base.UUID)
+    for reg in registries
+        haskey(reg.pkgs, pkg) && return reg.pkgs[pkg]
     end
-
-    for (k,v) in data["compat"]
-        old = get(old_data["compat"], k, "")
-        if old != v
-            printstyled("$k: "; color=:light_cyan)
-            printstyled(old, "  ", color=:light_black)
-            printstyled(string(v), '\n'; color=:green, underline=true, bold=true)
-        end
-    end
-
-    return data
 end
-
-function update_compat!(project_toml::String)
-    original = read(project_toml, String)
-    try
-        data = update_compat(project_toml)
-        get!(data, "compat", Dict{String,Any}())
-        io = IOBuffer()
-        TOML.print(io, data; sorted=true, by=key->(Pkg.Types.project_key_order(key), key))
-        content = String(take!(io))
-
-        compat = filter(kv -> kv[1] != "julia", data["compat"])
-        lines = Dict(k => string(k, " = ", repr(v)) for (k,v) in compat)
-
-        width = maximum(length, values(lines))
-        content = replace(content, "[compat]" => "[compat]" * ' ' ^ (width - 6) * "# Latest:")
-        for (pkg, line) in lines
-            v = maximum(versions(pkg))
-            content = replace(content, line => line * ' ' ^ (width - length(line)) * "  #   $v")
-        end
-
-        open(project_toml, "w") do io
-            print(io, content)
-        end
-        return project_toml
-    catch
-        @warn "An Error occurred.  Restoring original file: $project_toml."
-        open(project_toml, "w") do io
-            print(io, original)
+function pkg_entry(pkg::String)
+    for reg in registries
+        if haskey(reg.name_to_uuids, pkg)
+            entries = reg.name_to_uuids[pkg]
+            length(entries) > 1 && @warn "Multiple entries found for $pkg.  Returning first entry."
+            return pkg_entry(entries[1])
         end
     end
 end
+
+#-----------------------------------------------------------------------------# versions
+function version_infos(pkg::Union{String,Base.UUID}; include_yanked::Bool=false)
+    info = pkg_entry(pkg).info.version_info
+    !include_yanked ? filter(x -> !x.second.yanked, info) : info
+end
+
+versions(pkg::Union{String,Base.UUID}; include_yanked::Bool=false) = collect(keys(version_infos(pkg; include_yanked)))
+
+
+#-----------------------------------------------------------------------------# CompatEntry
+mutable struct CompatEntry
+    project::Project
+    pkg::String
+    uuid::Base.UUID
+    val::Union{Nothing, VersionSpec}
+    str::Union{Nothing, String}
+    versions::Vector{VersionNumber}
+    allowed_versions::Vector{VersionNumber}
+end
+
+function CompatEntry(project::Project, pkg::String)
+    uuid = pkg_entry(pkg).uuid
+    (;val, str) = get(project.compat, pkg, (;val=nothing, str=nothing))
+    vrs = versions(pkg)
+    allowed = filter(x -> x ∈ val, vrs)
+    CompatEntry(project, pkg, uuid, val, str, vrs, allowed)
+end
+
+function Base.show(io::IO, entry::CompatEntry)
+    (; project, pkg, val, str) = entry
+    p(args...; kw...) = printstyled(io, args...; kw...)
+    p("CompatEntry"; color=:normal)
+    p(" ", project.name, ": ", color=:light_black)
+    p(pkg, " = ", repr(str); color=:light_cyan)
+    p(" (", val, ')', color=:light_green)
+end
+
+
+function read_compat_entries(project_toml::String)
+    project = read_project(project_toml)
+    CompatEntry.(Ref(project), keys(project.compat))
+end
+
+#------------------------------------------------------------------------# CompatyEntryUpdateMethod
+abstract type CompatEntryUpdateMethod end
+
+
+
+# function update_compat(project_toml::String; io=stdout)
+#     project = read_project(file)
+#     df = DataFrame(
+#         pkg = String[],
+#         versions = VersionNumber[],
+#         compat_val = VersionSpec[],
+#         compat_str = String[],
+#         latest_in_compat = Bool[],
+
+#     )
+
+#     for (pkg, compat) in project.compat
+#         (pkg == "julia" || is_stdlib(project.deps[pkg])) && continue
+#         (;val::VersionSpec, str::String) = compat
+#         latest = maximum(versions(pkg))
+
+
+#         # START HERE
+
+#         red_update = latest ∈ val
+#         yel_update =
+
+#         needs_update = latest ∉ val
+#         needs_update ? printstyled(io, '✗'; color=:light_red) : printstyled(io, '✔' ; color=:light_green)
+#         printstyled(io, " $pkg = ", repr(str); color=:light_cyan)
+#         needs_update ? printstyled(io, " ($latest)"; color=:light_red) : printstyled(io, " ($latest)"; color=:light_green)
+#         println(io)
+#     end
+# end
 
 end
