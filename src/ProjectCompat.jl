@@ -57,6 +57,9 @@ function update(entry::CompatEntry)
         spec = VersionSpec("$major.$minor")
         return CompatEntry(project, pkg, uuid, spec, string(spec))
     elseif latest ∈ val
+        entry = deepcopy(entry)
+        union!(entry.val.ranges)
+        entry.str = string(entry.val)
         return entry
     else
         max_range = maximum(val.ranges)
