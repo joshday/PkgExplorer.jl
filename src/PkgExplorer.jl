@@ -4,14 +4,9 @@ using Dates
 using Pkg
 using Pkg.Types: VersionSpec, Project, read_project, is_stdlib
 
-using Term: Term
 using DataFrames
 
-export
-    # Compat
-    CompatEntry, read_compat_entries,
-    # Utils
-    registry_df, pkg_entry, versions
+export ProjectCompat, registry_df, pkg_entry, versions
 
 #-----------------------------------------------------------------------------# __init__
 const registries = Pkg.Registry.reachable_registries()
@@ -70,43 +65,8 @@ end
 
 versions(pkg::Union{String,Base.UUID}; include_yanked::Bool=false) = collect(keys(version_infos(pkg; include_yanked)))
 
-
-#-----------------------------------------------------------------------------# CompatEntry
-mutable struct CompatEntry
-    project::Project
-    pkg::String
-    uuid::Base.UUID
-    val::Union{Nothing, VersionSpec}
-    str::Union{Nothing, String}
-    versions::Vector{VersionNumber}
-    allowed_versions::Vector{VersionNumber}
-end
-
-function CompatEntry(project::Project, pkg::String)
-    uuid = pkg_entry(pkg).uuid
-    (;val, str) = get(project.compat, pkg, (;val=nothing, str=nothing))
-    vrs = versions(pkg)
-    allowed = filter(x -> x ∈ val, vrs)
-    CompatEntry(project, pkg, uuid, val, str, vrs, allowed)
-end
-
-function Base.show(io::IO, entry::CompatEntry)
-    (; project, pkg, val, str) = entry
-    p(args...; kw...) = printstyled(io, args...; kw...)
-    p("CompatEntry"; color=:normal)
-    p(" ", project.name, ": ", color=:light_black)
-    p(pkg, " = ", repr(str); color=:light_cyan)
-    p(" (", val, ')', color=:light_green)
-end
-
-
-function read_compat_entries(project_toml::String)
-    project = read_project(project_toml)
-    CompatEntry.(Ref(project), keys(project.compat))
-end
-
-#------------------------------------------------------------------------# CompatyEntryUpdateMethod
-abstract type CompatEntryUpdateMethod end
+#-----------------------------------------------------------------------------# Compat
+include("ProjectCompat.jl")
 
 
 

@@ -1,30 +1,79 @@
-#-----------------------------------------------------------------------------# update_compat
-# deps::Dict{String, Base.UUID}
-# compat::Dict{String, Pkg.Types.Compat}
+module ProjectCompat
 
-function update_compat(project::Pkg.Types.Project)
-    for (pkg, compat) in project.compat
-        is_stdlib(pkg) || pkg == "julia" && continue
-        (;val, str) = compat
-        available_versions = versions(pkg)
-        latest = maximum(available_versions)
-        if latest ∈ available_versions
-            @info "$pkg is up-to-date. $latest ∈ $(repr(str))"
-        else
-            @info "`$pkg = $(repr(str))` is out-of-date.  Latest version: $latest"
-        end
+using ..PkgExplorer: pkg_entry, versions
+using Pkg.Types: VersionSpec, Project, read_project, is_stdlib
+using Pkg.Versions: VersionRange, VersionBound
+
+export VersionSpec, Project, read_project, is_stdlib, VersionRange, VersionBound,
+    CompatEntry, update, read_compat_entries
+
+#-----------------------------------------------------------------------------# CompatEntry
+mutable struct CompatEntry
+    project::Project
+    pkg::String
+    uuid::Base.UUID
+    val::Union{Nothing, VersionSpec}
+    str::Union{Nothing, String}
+end
+
+function CompatEntry(project::Project, pkg::String)
+    uuid = pkg_entry(pkg).uuid
+    (;val, str) = get(project.compat, pkg, (;val=nothing, str=nothing))
+    CompatEntry(project, pkg, uuid, val, str)
+end
+
+function Base.show(io::IO, entry::CompatEntry)
+    (; project, pkg, uuid, val, str) = entry
+    p(args...; kw...) = printstyled(io, args...; kw...)
+    p("CompatEntry"; color=:normal)
+    p(" ", project.name, ": ", color=:light_black)
+    if isnothing(val)
+        p(pkg, " = (missing)"; color=:light_red)
+    else
+        p(pkg, " = ", repr(str); color=:light_cyan)
+        latest = maximum(versions(uuid))
+        latest in val ?
+            p(" ($latest ∈ $val)"; color=:light_green) :
+            p(" ($latest ∉ $val)"; color=:light_red)
     end
 end
 
-
-#-----------------------------------------------------------------------------# update_compat_entry
-# e.g. entry = `EasyConfig = "0.1.15"`
-function update_compat_entry(entry::String)
-    pkg, bounds = replace.(strip.(split(entry, '=')), Ref('"' => ""))
-    available_versions = versions(pkg)
+function read_compat_entries(project_toml::String)
+    project = read_project(project_toml)
+    CompatEntry.(Ref(project), keys(filter(x -> !is_stdlib(x[2]), project.deps)))
 end
 
 
+is_outdated(x::CompatEntry) = isnothing(x.val) ? true : maximum(versions(x.uuid)) ∉ x.val
+
+#-----------------------------------------------------------------------------# update
+# TODO: Work with un-registered dependencies
+function update(entry::CompatEntry)
+    (; project, pkg, uuid, val, str) = entry
+    vrs = versions(uuid)
+    latest = maximum(vrs)
+    (; major, minor) = latest
+    if isnothing(val)
+        spec = VersionSpec("$major.$minor")
+        return CompatEntry(project, pkg, uuid, spec, string(spec))
+    elseif latest ∈ val
+        return entry
+    else
+        max_range = maximum(val.ranges)
+        entry = deepcopy(entry)
+        upper = VersionBound((major, minor))
+        push!(entry.val.ranges, VersionRange(max_range.upper, upper))
+        union!(entry.val.ranges)
+        entry.str = string(entry.val)
+        return entry
+    end
+end
+
+# x = read_compat_entries("/Users/joshday/.julia/dev/OnlineStats/Project.toml")
+# entry = x[end]
+
+
+end #module
 
 # #-----------------------------------------------------------------------------# update_compat
 # function update_compat(project_toml::String)
