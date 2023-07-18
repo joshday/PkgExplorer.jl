@@ -2,24 +2,33 @@ module PkgExplorer
 
 using Dates
 using Pkg
-using Pkg.Types: VersionSpec, Project, read_project, is_stdlib
+using Pkg.Types: VersionSpec, Project, Compat, is_stdlib
+using Pkg.Versions: VersionRange, VersionBound, semver_spec
 
 using DataFrames
 
-export ProjectCompat, registry_df, pkg_entry, versions
+export ProjectCompat, registry_df, registries, pkg_entry, versions,
+    update_compat, update_compat!,
+    is_stdlib # re-export from Pkg.Types
 
 #-----------------------------------------------------------------------------# __init__
-const registries = Pkg.Registry.reachable_registries()
 const registry_df = DataFrame()
 
 function __init__()
-    @info "Updating Registries..."
-    Pkg.Registry.update()
     for reg in registries
         Pkg.Registry.init_package_info!.(values(reg.pkgs))
         Pkg.Registry.create_name_uuid_mapping!(reg)
     end
-    @info "Updating `registry_df`..."
+    registry_df!()
+end
+
+#-----------------------------------------------------------------------------# registry_df!
+function registry_df!(registries = Pkg.Registry.reachable_registries())
+    @info "Updating registry_df..."
+    for reg in registries
+        Pkg.Registry.init_package_info!.(values(reg.pkgs))
+        Pkg.Registry.create_name_uuid_mapping!(reg)
+    end
     temp_df = mapreduce(vcat, registries, init = DataFrame()) do reg
         DataFrame((
                 registry = reg.name,
@@ -63,41 +72,47 @@ function version_infos(pkg::Union{String,Base.UUID}; include_yanked::Bool=false)
     !include_yanked ? filter(x -> !x.second.yanked, info) : info
 end
 
-versions(pkg::Union{String,Base.UUID}; include_yanked::Bool=false) = collect(keys(version_infos(pkg; include_yanked)))
+versions(pkg::Union{String,Base.UUID}; include_yanked::Bool=false) = sort!(collect(keys(version_infos(pkg; include_yanked))))
 
-#-----------------------------------------------------------------------------# Compat
-include("ProjectCompat.jl")
+#-----------------------------------------------------------------------------# update_compat
+function update_compat(old_project::Project; io::IO = stdout, verbose=true, ignore=[])
+    p(args...; kw...) = verbose && printstyled(io, args...; kw...)
+    p("update_compat with Project: ", repr(old_project.name), ": \n", color=:light_black)
+    project = deepcopy(old_project)
 
+    for (pkg, uuid) in project.deps
+        (pkg == "julia" || is_stdlib(uuid) || pkg in ignore) && continue
+        (; val, str) = get(project.compat, pkg, (;val = nothing, str=""))
 
+        all_versions = versions(uuid)
+        all_majorminor = unique!(map(x -> VersionNumber(x.major, x.minor), all_versions))
+        (; major, minor) = all_majorminor[end]
 
-# function update_compat(project_toml::String; io=stdout)
-#     project = read_project(file)
-#     df = DataFrame(
-#         pkg = String[],
-#         versions = VersionNumber[],
-#         compat_val = VersionSpec[],
-#         compat_str = String[],
-#         latest_in_compat = Bool[],
+        if isempty(str)
+            str = "$major.$minor"
+        else
+            latest_spec = VersionNumber(split(str, ", ")[end])
+            versions_to_add = filter(x -> x > latest_spec, all_majorminor)
+            for v in versions_to_add
+                str *= ", $(v.major).$(v.minor)"
+            end
+        end
 
-#     )
+        project.compat[pkg] = Compat(semver_spec(str), str)
+        old = get(old_project.compat, pkg, (;str=nothing))
+        new = project.compat[pkg]
+        if old != new
+            p("  ", pkg, " = ", repr(old.str); color=:light_yellow)
+            p(" → ", repr(new.str), "\n", color=:light_cyan)
+        else
+            p("  ✓ $pkg = ", repr(old.str), "\n", color=:light_green)
+        end
+    end
+    return project
+end
 
-#     for (pkg, compat) in project.compat
-#         (pkg == "julia" || is_stdlib(project.deps[pkg])) && continue
-#         (;val::VersionSpec, str::String) = compat
-#         latest = maximum(versions(pkg))
+update_project(file::String; kw...) = update_compat(Pkg.Types.read_project(file); kw...)
 
-
-#         # START HERE
-
-#         red_update = latest ∈ val
-#         yel_update =
-
-#         needs_update = latest ∉ val
-#         needs_update ? printstyled(io, '✗'; color=:light_red) : printstyled(io, '✔' ; color=:light_green)
-#         printstyled(io, " $pkg = ", repr(str); color=:light_cyan)
-#         needs_update ? printstyled(io, " ($latest)"; color=:light_red) : printstyled(io, " ($latest)"; color=:light_green)
-#         println(io)
-#     end
-# end
+update_compat!(file::String; kw...) = Pkg.Types.write_project(update_project(file; kw...), file)
 
 end
